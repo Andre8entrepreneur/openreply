@@ -139,6 +139,17 @@ model InstagramAccount {
   connectedAt       DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
+  /// User-configurable ceiling on the hourly private-reply bucket in
+  /// lib/utils/rate-limiter.ts. Never enforced above Meta's documented
+  /// 750/hour cap — this only lets an account be throttled *more* than that,
+  /// as a safety margin against bans.
+  hourlyDmLimit Int  @default(750)
+  /// Optional user-set cap on total DM sends (private replies, button-tap
+  /// reveals, and DM-triggered replies) from this account in a rolling 24h
+  /// window. Null means no daily cap — only the hourly bucket applies, which
+  /// matches behavior before this field existed.
+  dailyDmLimit  Int?
+
   workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   automations Automation[]
   dmLogs      DmLog[]

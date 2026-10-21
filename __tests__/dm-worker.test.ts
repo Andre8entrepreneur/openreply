@@ -13,6 +13,8 @@ const {
   mockMatchKeywords,
   mockReserveDMSlot,
   mockReleaseDMSlot,
+  mockReserveDailyDMSlot,
+  mockReleaseDailyDMSlot,
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
@@ -50,6 +52,8 @@ const {
   mockMatchKeywords: vi.fn(),
   mockReserveDMSlot: vi.fn(),
   mockReleaseDMSlot: vi.fn(),
+  mockReserveDailyDMSlot: vi.fn(),
+  mockReleaseDailyDMSlot: vi.fn(),
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
@@ -100,6 +104,8 @@ vi.mock("@/lib/utils/keyword-matcher", () => ({
 vi.mock("@/lib/utils/rate-limiter", () => ({
   reserveDMSlot: mockReserveDMSlot,
   releaseDMSlot: mockReleaseDMSlot,
+  reserveDailyDMSlot: mockReserveDailyDMSlot,
+  releaseDailyDMSlot: mockReleaseDailyDMSlot,
 }));
 
 vi.mock("@/lib/billing/usage", () => ({
@@ -166,6 +172,8 @@ const mockAutomation = {
     id: "ig_account_row_1",
     instagramId: "ig_456",
     accessToken: "encrypted_token_abc",
+    hourlyDmLimit: 750,
+    dailyDmLimit: null,
   },
   workspace: {
     id: "workspace_123",
@@ -263,6 +271,13 @@ beforeEach(() => {
     reserved: true,
   });
   mockReleaseDMSlot.mockResolvedValue(0);
+  mockReserveDailyDMSlot.mockResolvedValue({
+    allowed: true,
+    currentCount: 1,
+    remainingDMs: null,
+    reserved: true,
+  });
+  mockReleaseDailyDMSlot.mockResolvedValue(0);
   mockReleaseWorkspaceDMReservation.mockResolvedValue({ count: 1 });
   mockSendPrivateReply.mockResolvedValue({
     recipient_id: "commenter_999",
@@ -355,7 +370,7 @@ describe("DM Worker — Full Pipeline", () => {
       true
     );
     expect(mockReserveWorkspaceDMSend).toHaveBeenCalledWith("workspace_123");
-    expect(mockReserveDMSlot).toHaveBeenCalledWith("ig_456", 0);
+    expect(mockReserveDMSlot).toHaveBeenCalledWith("ig_456", 0, 750);
     // A successful send keeps its slot; the release path is failure-only.
     expect(mockReleaseDMSlot).not.toHaveBeenCalled();
     expect(mockDecryptToken).toHaveBeenCalledWith("encrypted_token_abc");

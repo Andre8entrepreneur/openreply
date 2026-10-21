@@ -39,7 +39,12 @@ import {
   type InstagramContext,
 } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
-import { reserveDMSlot, releaseDMSlot } from "@/lib/utils/rate-limiter";
+import {
+  reserveDMSlot,
+  releaseDMSlot,
+  reserveDailyDMSlot,
+  releaseDailyDMSlot,
+} from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
   reserveWorkspaceDMSend,
@@ -549,7 +554,11 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
     let rateLimit;
     try {
-      rateLimit = await reserveDMSlot(instagramAccountId, requeueAttempt);
+      rateLimit = await reserveDMSlot(
+        instagramAccountId,
+        requeueAttempt,
+        automation.instagramAccount.hourlyDmLimit
+      );
     } catch (error) {
       await releaseWorkspaceDMReservation(
         automation.workspaceId,
@@ -623,6 +632,36 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       }
     }
 
+    // Separate from the hourly bucket above: this is the user's own
+    // (optional) ban-avoidance dial on total daily volume, not a Meta-imposed
+    // cap, so it's checked after the hourly reservation succeeds rather than
+    // folded into it.
+    const dailySlot = await reserveDailyDMSlot(
+      instagramAccountId,
+      automation.instagramAccount.dailyDmLimit
+    );
+    if (!dailySlot.allowed) {
+      if (rateLimit.reserved) await releaseDMSlot(instagramAccountId);
+      await releaseWorkspaceDMReservation(
+        automation.workspaceId,
+        usage.periodStart
+      );
+      await prisma.dmLog.update({
+        where: {
+          automationId_commentId: {
+            automationId: automation.id,
+            commentId,
+          },
+        },
+        data: {
+          status: "SKIPPED_RATE_LIMIT",
+          matchedKeyword: matchResult.matchedKeyword,
+          errorMessage: `Daily DM limit reached (${automation.instagramAccount.dailyDmLimit})`,
+        },
+      });
+      continue;
+    }
+
     // With an opening DM, the private reply is a button message; tapping it
     // fires a postback that delivers the reveal (see processPostback). Without
     // one, we send the reveal text directly as today.
@@ -653,11 +692,13 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       claimed = await claimCommentDelivery(automation.id, commentId, "dm");
     } catch (error) {
       if (rateLimit?.reserved) await releaseDMSlot(instagramAccountId);
+      if (dailySlot?.reserved) await releaseDailyDMSlot(instagramAccountId);
       await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
       throw error;
     }
     if (!claimed) {
       if (rateLimit?.reserved) await releaseDMSlot(instagramAccountId);
+      if (dailySlot?.reserved) await releaseDailyDMSlot(instagramAccountId);
       await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
       continue;
     }
@@ -783,6 +824,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       // Retain reservations if the provider may have delivered the message.
       if (isConfirmedSendRejection(sendError)) {
         if (rateLimit?.reserved) await releaseDMSlot(instagramAccountId);
+        if (dailySlot?.reserved) await releaseDailyDMSlot(instagramAccountId);
         await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
       }
       await prisma.dmLog.update({
@@ -1105,6 +1147,40 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     return;
   }
 
+  // The account-wide daily cap applies here too: it's about total send
+  // volume off this account, not just the private-reply API's hourly bucket.
+  const dailySlot = await reserveDailyDMSlot(
+    automation.instagramAccount.instagramId,
+    automation.instagramAccount.dailyDmLimit,
+  );
+  if (!dailySlot.allowed) {
+    await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+    await prisma.dmLog.upsert({
+      where: {
+        automationId_commentId: {
+          automationId: automation.id,
+          commentId: dedupeId,
+        },
+      },
+      create: {
+        workspaceId: automation.workspaceId,
+        automationId: automation.id,
+        instagramAccountId: automation.instagramAccountId,
+        commenterId: userId,
+        commenterName,
+        commentText: "(button tap)",
+        commentId: dedupeId,
+        status: "SKIPPED_RATE_LIMIT",
+        errorMessage: `Daily DM limit reached (${automation.instagramAccount.dailyDmLimit})`,
+      },
+      update: {
+        status: "SKIPPED_RATE_LIMIT",
+        errorMessage: `Daily DM limit reached (${automation.instagramAccount.dailyDmLimit})`,
+      },
+    });
+    return;
+  }
+
   try {
     const delivered = await sendPostbackOnce({
       operationId,
@@ -1118,6 +1194,8 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
         }),
     });
     if (!delivered) {
+      if (dailySlot.reserved)
+        await releaseDailyDMSlot(automation.instagramAccount.instagramId);
       await releaseWorkspaceDMReservation(
         automation.workspaceId,
         usage.periodStart,
@@ -1168,10 +1246,14 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     });
   } catch (originalError) {
     const error = classifySendError(originalError);
-    if (isConfirmedSendRejection(error)) await releaseWorkspaceDMReservation(
-      automation.workspaceId,
-      usage.periodStart,
-    );
+    if (isConfirmedSendRejection(error)) {
+      if (dailySlot.reserved)
+        await releaseDailyDMSlot(automation.instagramAccount.instagramId);
+      await releaseWorkspaceDMReservation(
+        automation.workspaceId,
+        usage.periodStart,
+      );
+    }
 
     // The read fallback is speculative: it only runs when the user read the
     // opening DM and never tapped the button, which means they never messaged
@@ -1436,6 +1518,32 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       continue;
     }
 
+    const dailySlot = await reserveDailyDMSlot(
+      instagramAccountId,
+      automation.instagramAccount.dailyDmLimit
+    );
+    if (!dailySlot.allowed) {
+      await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: {
+            automationId: automation.id,
+            commentId: dedupeId,
+          },
+        },
+        create: {
+          ...logBase,
+          status: "SKIPPED_RATE_LIMIT",
+          errorMessage: `Daily DM limit reached (${automation.instagramAccount.dailyDmLimit})`,
+        },
+        update: {
+          status: "SKIPPED_RATE_LIMIT",
+          errorMessage: `Daily DM limit reached (${automation.instagramAccount.dailyDmLimit})`,
+        },
+      });
+      continue;
+    }
+
     try {
       if (sendFollowPrompt) {
         const promptText = renderMessageWithoutLink({
@@ -1502,6 +1610,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         },
       });
     } catch (error) {
+      if (dailySlot.reserved) await releaseDailyDMSlot(instagramAccountId);
       await releaseWorkspaceDMReservation(
         automation.workspaceId,
         usage.periodStart

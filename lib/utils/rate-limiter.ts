@@ -21,6 +21,8 @@ const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
 const REQUEUE_DELAY_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_REQUEUE_ATTEMPTS = 3;
 
+const DAILY_RATE_LIMIT_WINDOW = 86400; // 24 hours in seconds
+
 let redis: Redis | null = null;
 
 function getRedis(): Redis {
@@ -104,7 +106,8 @@ function blockedResult(
  */
 export async function checkRateLimit(
   instagramAccountId: string,
-  requeueAttempt: number = 0
+  requeueAttempt: number = 0,
+  hourlyMax: number = RATE_LIMIT_MAX
 ): Promise<RateLimitResult> {
   const client = getRedis();
   const key = `rate:dm:${instagramAccountId}`;
@@ -112,7 +115,7 @@ export async function checkRateLimit(
   const currentCount = await client.get(key);
   const count = currentCount ? parseInt(currentCount, 10) : 0;
 
-  if (count >= RATE_LIMIT_MAX) {
+  if (count >= hourlyMax) {
     // Over the limit
     if (requeueAttempt >= MAX_REQUEUE_ATTEMPTS) {
       // Exceeded max requeue attempts — skip this DM
@@ -141,7 +144,7 @@ export async function checkRateLimit(
   return {
     allowed: true,
     currentCount: count,
-    remainingDMs: RATE_LIMIT_MAX - count,
+    remainingDMs: hourlyMax - count,
     shouldRequeue: false,
     requeueDelayMs: 0,
     shouldSkip: false,
@@ -153,10 +156,16 @@ export async function checkRateLimit(
  * Atomically reserve a DM send slot for an Instagram account.
  * This is the worker-safe path; it prevents concurrent jobs from all passing
  * the rate-limit check before any of them increments the Redis counter.
+ *
+ * hourlyMax defaults to Meta's documented 750/hour cap. Pass an account's own
+ * (user-configured) hourlyDmLimit to throttle more conservatively than that —
+ * never pass anything above RATE_LIMIT_MAX, since Meta will reject sends past
+ * its own cap regardless of what this allows.
  */
 export async function reserveDMSlot(
   instagramAccountId: string,
-  requeueAttempt: number = 0
+  requeueAttempt: number = 0,
+  hourlyMax: number = RATE_LIMIT_MAX
 ): Promise<RateLimitResult> {
   const client = getRedis();
   const key = `rate:dm:${instagramAccountId}`;
@@ -165,7 +174,7 @@ export async function reserveDMSlot(
     RESERVE_DM_SLOT_SCRIPT,
     1,
     key,
-    RATE_LIMIT_MAX,
+    hourlyMax,
     RATE_LIMIT_WINDOW
   );
   const values = Array.isArray(result) ? result : [];
@@ -250,5 +259,112 @@ export async function resetRateLimit(
   await client.del(key);
 }
 
+export interface DailyLimitResult {
+  allowed: boolean;
+  currentCount: number;
+  remainingDMs: number | null; // null when dailyMax is null (no cap set)
+  reserved: boolean;
+}
+
+const RESERVE_DAILY_SLOT_SCRIPT = `
+local current = tonumber(redis.call("GET", KEYS[1]) or "0")
+local max = tonumber(ARGV[1]) -- -1 means uncapped
+local ttl = tonumber(ARGV[2])
+
+if max >= 0 and current >= max then
+  return {0, current}
+end
+
+local next_count = redis.call("INCR", KEYS[1])
+if next_count == 1 then
+  redis.call("EXPIRE", KEYS[1], ttl)
+end
+
+return {1, next_count}
+`;
+
+function dailyKey(instagramAccountId: string): string {
+  return `rate:dm:daily:${instagramAccountId}`;
+}
+
+/**
+ * Atomically reserve a slot against an account's user-configured daily cap.
+ *
+ * Unlike the hourly bucket (which mirrors a cap Meta itself enforces), this
+ * one only exists because a self-hoster set it — so a null dailyMax means "no
+ * cap" rather than "unset". The counter still increments even with no cap, so
+ * the dashboard can show how many DMs went out in the last 24h regardless of
+ * whether a limit is configured.
+ *
+ * The window is a rolling 24h TTL (same pattern as the hourly bucket), not a
+ * calendar-day reset — it's about capping sustained send velocity, not
+ * matching a wall-clock midnight.
+ */
+export async function reserveDailyDMSlot(
+  instagramAccountId: string,
+  dailyMax: number | null
+): Promise<DailyLimitResult> {
+  const client = getRedis();
+  const key = dailyKey(instagramAccountId);
+  const max = dailyMax ?? -1;
+
+  const result = await client.eval(
+    RESERVE_DAILY_SLOT_SCRIPT,
+    1,
+    key,
+    max,
+    DAILY_RATE_LIMIT_WINDOW
+  );
+  const values = Array.isArray(result) ? result : [];
+  const allowedFlag = toScriptNumber(values[0]);
+  const count = toScriptNumber(values[1]);
+
+  if (allowedFlag !== 1) {
+    return { allowed: false, currentCount: count, remainingDMs: 0, reserved: false };
+  }
+
+  return {
+    allowed: true,
+    currentCount: count,
+    remainingDMs: dailyMax === null ? null : dailyMax - count,
+    reserved: true,
+  };
+}
+
+/**
+ * Release a daily slot previously taken by reserveDailyDMSlot, mirroring
+ * releaseDMSlot's clamp-at-zero behavior for the same reasons (a send that
+ * never went out must not permanently inflate the day's count).
+ */
+export async function releaseDailyDMSlot(
+  instagramAccountId: string
+): Promise<number> {
+  const client = getRedis();
+  const key = dailyKey(instagramAccountId);
+  const next = await client.decr(key);
+  if (next < 0) {
+    await client.del(key);
+    return 0;
+  }
+  return next;
+}
+
+/**
+ * Get the current rolling-24h DM count for an Instagram account, for display.
+ */
+export async function getCurrentDailyDMCount(
+  instagramAccountId: string
+): Promise<number> {
+  const client = getRedis();
+  const count = await client.get(dailyKey(instagramAccountId));
+  return count ? parseInt(count, 10) : 0;
+}
+
 // Export constants for use in tests
-export { RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, REQUEUE_DELAY_MS, MAX_REQUEUE_ATTEMPTS };
+export {
+  RATE_LIMIT_MAX,
+  RATE_LIMIT_WINDOW,
+  REQUEUE_DELAY_MS,
+  MAX_REQUEUE_ATTEMPTS,
+  DAILY_RATE_LIMIT_WINDOW,
+};
