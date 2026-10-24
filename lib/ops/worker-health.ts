@@ -2,7 +2,7 @@ import { getRedisConnection } from "@/lib/queue/client";
 
 const WORKER_HEALTH_KEY = "health:worker:dm";
 const WORKER_ALERTS_KEY = "alerts:worker:dm";
-const WORKER_HEARTBEAT_TTL_SECONDS = 120;
+const WORKER_HEARTBEAT_TTL_SECONDS = 180;
 
 export interface WorkerHeartbeat {
   status: "running";
