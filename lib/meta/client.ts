@@ -648,6 +648,20 @@ export async function getUserMedia(
   return data.data;
 }
 
+/** Publish time (ISO string) of one media item. */
+export async function getMediaTimestamp(
+  accessToken: string,
+  mediaId: string
+): Promise<string> {
+  const url = new URL(`${instagramGraphBase()}/${encodeURIComponent(mediaId)}`);
+  url.searchParams.set("fields", "timestamp");
+  url.searchParams.set("access_token", accessToken);
+
+  const response = await fetch(url.toString());
+  const data = await handleResponse<{ timestamp: string }>(response);
+  return data.timestamp;
+}
+
 /**
  * Fetch media by following pagination cursors until `max` items are collected
  * or there are no more pages. Pass a large `max` for an "all time" view; the

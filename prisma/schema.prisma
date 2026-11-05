@@ -213,6 +213,11 @@ model Automation {
   publicReplyMessage String?
   publicReplyMessages String[] @default([])
   isActive       Boolean @default(true)
+  /// Set when the daily job switched this campaign off because its post was
+  /// older than the expiry window. Switching the campaign back on does not
+  /// clear it, so a campaign re-enabled by hand is never switched off again;
+  /// pointing the campaign at a different post clears it.
+  autoExpiredAt  DateTime?
   wholeWordMatch Boolean @default(true)
   reportShareSlug    String? @unique
   reportShareEnabled Boolean @default(true)

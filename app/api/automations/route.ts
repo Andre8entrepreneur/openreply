@@ -530,7 +530,14 @@ export async function PATCH(request: NextRequest) {
   const updated = await prisma.$transaction(async (tx) => {
     const campaign = await tx.automation.update({
       where: { id: automationId },
-      data: automationData,
+      data: {
+        ...automationData,
+        // A new post restarts the auto-expiry clock for this campaign.
+        ...(automationData.postId !== undefined &&
+        automationData.postId !== existing.postId
+          ? { autoExpiredAt: null }
+          : {}),
+      },
     });
 
     await syncCampaignLinks(tx, {
