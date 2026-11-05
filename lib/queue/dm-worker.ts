@@ -1713,8 +1713,38 @@ async function recordWorkerFailure(
   }
 }
 
+// While any job is delayed (follow-ups, opening-DM fallbacks, retry backoff),
+// BullMQ caps each blocking wait at a hard-coded 10s, so the worker issues ~660
+// Redis commands an hour until that job is due (measured). Waiting up to 5
+// minutes instead cuts that ~25x without making delayed jobs late: the wait
+// still ends exactly when the earliest delayed job is due, and adding a job
+// (or an earlier delayed one) wakes the worker immediately through the marker.
+// BullMQ's own watchdog reconnects if a long wait never answers.
+const MAX_DELAYED_BLOCK_SECONDS = Number(
+  process.env.WORKER_MAX_DELAYED_BLOCK_SECONDS ?? 300
+);
+
+/** Seconds to block waiting for the next delayed job (see above). */
+export function delayedBlockTimeout(
+  blockUntil: number,
+  now: number,
+  minimumBlockTimeout: number,
+  maxSeconds = MAX_DELAYED_BLOCK_SECONDS
+): number {
+  const blockDelay = blockUntil - now;
+  if (blockDelay <= 0) return blockDelay;
+  return Math.max(Math.min(blockDelay / 1000, maxSeconds), minimumBlockTimeout);
+}
+
+class DmWorker extends Worker<DmQueueJob> {
+  protected getBlockTimeout(blockUntil: number): number {
+    if (!blockUntil) return super.getBlockTimeout(blockUntil);
+    return delayedBlockTimeout(blockUntil, Date.now(), this.minimumBlockTimeout);
+  }
+}
+
 export function createDMWorker(): Worker<DmQueueJob> {
-  const worker = new Worker<DmQueueJob>("dm-processing", processJob, {
+  const worker = new DmWorker("dm-processing", processJob, {
     connection: getRedisConnection(),
     concurrency: 5,
     // Upstash bills every Redis command, and an idle BullMQ worker never stops
@@ -1724,9 +1754,11 @@ export function createDMWorker(): Worker<DmQueueJob> {
     // empty queue. A longer drainDelay adds no latency: adding a job pushes a
     // marker that wakes the worker instantly, and delayed jobs still wake it
     // on time.
-    drainDelay: Number(process.env.WORKER_DRAIN_DELAY_SECONDS ?? 300),
+    // 30 minutes each. A crashed mid-send job is picked up again within 30
+    // minutes; new and delayed jobs are unaffected (see above).
+    drainDelay: Number(process.env.WORKER_DRAIN_DELAY_SECONDS ?? 1800),
     stalledInterval: Number(
-      process.env.WORKER_STALLED_INTERVAL_MS ?? 5 * 60_000
+      process.env.WORKER_STALLED_INTERVAL_MS ?? 30 * 60_000
     ),
     settings: {
       backoffStrategy: (attemptsMade: number) =>

@@ -144,7 +144,7 @@ vi.mock("bullmq", () => {
 });
 
 import { MetaApiError, RateLimitError } from "@/lib/meta/client";
-import { createDMWorker } from "../lib/queue/dm-worker";
+import { createDMWorker, delayedBlockTimeout } from "../lib/queue/dm-worker";
 import { getRedisConnection } from "@/lib/queue/client";
 import { hashRecipientId } from "@/lib/tracking/server";
 
@@ -1778,4 +1778,24 @@ it("retains the public reply claim if sending succeeded but its log write failed
   await process({ ...createMockJob(), id: "next-poll" });
   expect(sendCommentReply).toHaveBeenCalledTimes(1);
   expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+});
+
+describe("delayedBlockTimeout", () => {
+  const now = 1_000_000;
+
+  it("waits until the delayed job is due when that is under the cap", () => {
+    expect(delayedBlockTimeout(now + 90_000, now, 0.001, 300)).toBe(90);
+  });
+
+  it("caps long waits at the configured maximum instead of BullMQ's 10s", () => {
+    expect(delayedBlockTimeout(now + 3_600_000, now, 0.001, 300)).toBe(300);
+  });
+
+  it("returns a non-positive value once the job is due, so it is fetched now", () => {
+    expect(delayedBlockTimeout(now - 5, now, 0.001, 300)).toBeLessThanOrEqual(0);
+  });
+
+  it("never waits less than BullMQ's minimum block timeout", () => {
+    expect(delayedBlockTimeout(now + 1, now, 0.001, 300)).toBe(0.001);
+  });
 });

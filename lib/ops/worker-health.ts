@@ -2,8 +2,9 @@ import { getRedisConnection } from "@/lib/queue/client";
 
 const WORKER_HEALTH_KEY = "health:worker:dm";
 const WORKER_ALERTS_KEY = "alerts:worker:dm";
-// Must stay well above the worker's heartbeat interval (15 min by default).
-const WORKER_HEARTBEAT_TTL_SECONDS = 45 * 60;
+// Must stay well above the worker's heartbeat interval (hourly by default),
+// so one late beat doesn't flag the worker down.
+const WORKER_HEARTBEAT_TTL_SECONDS = 3 * 60 * 60;
 
 export interface WorkerHeartbeat {
   status: "running";

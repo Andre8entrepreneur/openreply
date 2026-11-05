@@ -8,9 +8,9 @@ const worker = createDMWorker();
 const startedAt = new Date().toISOString();
 // Each heartbeat is one Redis write. Keep it well under the health TTL
 // (WORKER_HEARTBEAT_TTL_SECONDS) so one missed beat doesn't flag the worker down.
-// 15 minutes keeps this to ~100 Redis writes/day (was 1,440 at 60s).
+// Hourly keeps this to 24 Redis writes/day (was 1,440 at 60s).
 const HEARTBEAT_INTERVAL_MS = Number(
-  process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? 15 * 60_000
+  process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? 60 * 60_000
 );
 // Optional polling safety net for comments that webhooks miss. Off by default:
 // the worker is then purely event-driven and only acts when Instagram's webhook
