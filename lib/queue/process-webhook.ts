@@ -11,7 +11,7 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
 }) {
   if (incoming.object !== 'instagram' || !Array.isArray(incoming.entry)) return;
   const accounts = await prisma.instagramAccount.findMany({
-    where: { instagramId: { in: incoming.entry.map(e => e.id) }, provider, ...(workspaceId ? { workspaceId } : {}) },
+    where: { instagramId: { in: incoming.entry.map(e => e.id) }, provider, automationEnabled: true, ...(workspaceId ? { workspaceId } : {}) },
     select: { id: true, instagramId: true, workspaceId: true },
   });
   const accountMap = new Map(accounts.map(a => [a.instagramId, a]));

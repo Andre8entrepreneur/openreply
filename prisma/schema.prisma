@@ -149,6 +149,10 @@ model InstagramAccount {
   /// window. Null means no daily cap — only the hourly bucket applies, which
   /// matches behavior before this field existed.
   dailyDmLimit  Int?
+  /// Master on/off for this account's automations. While false, the webhook
+  /// handler drops this account's comments, DMs and button taps before they
+  /// are stored or queued, so a paused account costs no Redis commands.
+  automationEnabled Boolean @default(true)
 
   workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   automations Automation[]

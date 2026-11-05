@@ -308,6 +308,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       isActive: true,
       instagramAccount: {
         instagramId: instagramAccountId,
+        automationEnabled: true,
       },
     },
     include: {
@@ -1366,7 +1367,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       ...connectionScope(job.data),
       dmTriggerEnabled: true,
       isActive: true,
-      instagramAccount: { instagramId: instagramAccountId },
+      instagramAccount: { instagramId: instagramAccountId, automationEnabled: true },
     },
     include: {
       instagramAccount: true,

@@ -346,7 +346,7 @@ describe("DM Worker — Full Pipeline", () => {
       where: {
         OR: [{ postId: "media_101" }, { matchAnyPost: true }],
         isActive: true,
-        instagramAccount: { instagramId: "ig_456" },
+        instagramAccount: { instagramId: "ig_456", automationEnabled: true },
       },
       include: {
         instagramAccount: true,
