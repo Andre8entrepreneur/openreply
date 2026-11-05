@@ -8,12 +8,15 @@ const worker = createDMWorker();
 const startedAt = new Date().toISOString();
 // Each heartbeat is one Redis write. Keep it well under the health TTL
 // (WORKER_HEARTBEAT_TTL_SECONDS) so one missed beat doesn't flag the worker down.
-const HEARTBEAT_INTERVAL_MS = 60_000;
-// Polling safety net for comments that webhooks miss. Runs in the worker because
-// it must fire every few minutes and Vercel's free crons only run once a day.
-const POLL_INTERVAL_MS = Number(
-  process.env.COMMENT_POLL_INTERVAL_MS ?? 5 * 60_000
+// 15 minutes keeps this to ~100 Redis writes/day (was 1,440 at 60s).
+const HEARTBEAT_INTERVAL_MS = Number(
+  process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? 15 * 60_000
 );
+// Optional polling safety net for comments that webhooks miss. Off by default:
+// the worker is then purely event-driven and only acts when Instagram's webhook
+// reports a new comment or DM. Set COMMENT_POLL_INTERVAL_MS (e.g. 300000) to
+// turn the sweep back on.
+const POLL_INTERVAL_MS = Number(process.env.COMMENT_POLL_INTERVAL_MS ?? 0);
 
 console.log("[DM Worker] Started");
 
@@ -46,14 +49,21 @@ async function poll() {
   }
 }
 
-// Kick off one sweep shortly after boot, then on a fixed interval.
-setTimeout(() => void poll(), 10_000);
-const pollTimer = setInterval(() => void poll(), POLL_INTERVAL_MS);
+// Kick off one sweep shortly after boot, then on a fixed interval — only when
+// polling is enabled.
+let pollTimer: ReturnType<typeof setInterval> | undefined;
+if (POLL_INTERVAL_MS > 0) {
+  setTimeout(() => void poll(), 10_000);
+  pollTimer = setInterval(() => void poll(), POLL_INTERVAL_MS);
+  console.log(`[DM Worker] Comment polling every ${POLL_INTERVAL_MS / 1000}s`);
+} else {
+  console.log("[DM Worker] Comment polling off — webhook-triggered only");
+}
 
 async function shutdown(signal: string) {
   console.log(`[DM Worker] ${signal} received, closing worker`);
   clearInterval(heartbeatTimer);
-  clearInterval(pollTimer);
+  if (pollTimer) clearInterval(pollTimer);
   await worker.close();
   process.exit(0);
 }
